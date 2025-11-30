@@ -5,7 +5,7 @@ export type TokenDocument = Token & Document;
 
 @Schema({ timestamps: true })
 export class Token {
-  @Prop({ required: true, unique: true })
+  @Prop({ required: true, unique: true, set: (val: string) => val.toLowerCase() })
   address: string;
 
   @Prop()
@@ -50,7 +50,7 @@ export class Token {
   txCount: number;
 
   // Whitelist pools
-  @Prop({ required: true, default: [] })
+  @Prop({ required: true, default: [], set: (val: string[]) => val.map(v => v.toLowerCase()) })
   whitelistPools: string[];
 }
 

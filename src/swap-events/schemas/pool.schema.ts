@@ -5,13 +5,13 @@ export type PoolDocument = Pool & Document;
 
 @Schema({ timestamps: true })
 export class Pool {
-  @Prop({ required: true, unique: true, index: true })
+  @Prop({ required: true, unique: true, index: true, set: (val: string) => val.toLowerCase() })
   poolId: string; // bytes32 - pool ID hash
 
-  @Prop({ required: true, index: true })
+  @Prop({ required: true, index: true, set: (val: string) => val.toLowerCase() })
   currency0: string; // token0 address
 
-  @Prop({ required: true, index: true })
+  @Prop({ required: true, index: true, set: (val: string) => val.toLowerCase() })
   currency1: string; // token1 address
 
   @Prop({ required: true })
@@ -20,7 +20,7 @@ export class Pool {
   @Prop({ required: true })
   tickSpacing: number; // int24
 
-  @Prop({ required: true })
+  @Prop({ required: true, set: (val: string) => val.toLowerCase() })
   hooks: string; // hooks contract address
 
   @Prop({ required: true })
@@ -35,7 +35,7 @@ export class Pool {
   @Prop({ required: true })
   blockTimestamp: Date;
 
-  @Prop({ required: true })
+  @Prop({ required: true, set: (val: string) => val.toLowerCase() })
   transactionHash: string;
 
   @Prop({ default: '0' })

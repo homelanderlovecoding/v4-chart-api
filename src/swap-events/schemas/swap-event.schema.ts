@@ -5,16 +5,16 @@ export type SwapEventDocument = SwapEvent & Document;
 
 @Schema({ timestamps: true })
 export class SwapEvent {
-  @Prop({ required: true, index: true })
+  @Prop({ required: true, index: true, set: (val: string) => val.toLowerCase() })
   poolAddress: string;
 
-  @Prop({ required: true, index: true })
+  @Prop({ required: true, index: true, set: (val: string) => val.toLowerCase() })
   token0Address: string;
 
-  @Prop({ required: true, index: true })
+  @Prop({ required: true, index: true, set: (val: string) => val.toLowerCase() })
   token1Address: string;
 
-  @Prop({ required: true })
+  @Prop({ required: true, set: (val: string) => val.toLowerCase() })
   transactionHash: string;
 
   @Prop({ required: true })

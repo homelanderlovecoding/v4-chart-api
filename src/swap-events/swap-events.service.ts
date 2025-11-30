@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, Inject, forwardRef } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { ethers } from 'ethers';
@@ -8,6 +8,9 @@ import { Pool, PoolDocument } from './schemas/pool.schema';
 import { Token, TokenDocument } from '../aggregation/schemas/token.schema';
 import { ConfigService } from '../config/config.service';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import { AggregationService } from '../aggregation/aggregation.service';
+import { TickMath } from '../liquidityMath/tickMath';
+import { getAmount0, getAmount1 } from 'src/liquidityMath/liquidityAmounts';
 
 // Uniswap V4 Pool Manager ABI - Initialize, Swap, and ModifyLiquidity event signatures
 const POOL_MANAGER_ABI = [
@@ -28,68 +31,6 @@ function exponentToBigDecimal(decimals: number): number {
  */
 function safeDiv(numerator: number, denominator: number): number {
   return denominator !== 0 ? numerator / denominator : 0;
-}
-
-/**
- * Calculate sqrt price from tick
- * sqrtPrice = 1.0001^(tick/2)
- */
-function getSqrtRatioAtTick(tick: number): bigint {
-  const absTick = Math.abs(tick);
-
-  // Use the same calculation as Uniswap: 1.0001^(tick/2)
-  // For Q96 format: sqrt(1.0001^tick) * 2^96
-  let ratio = BigInt(1) << BigInt(96); // Start with 2^96
-
-  // This is a simplified approximation
-  // In production, you'd want to use the exact Uniswap tick math
-  const tickRatio = Math.pow(1.0001, tick / 2);
-  ratio = BigInt(Math.floor(tickRatio * Number(BigInt(1) << BigInt(96))));
-
-  return ratio;
-}
-
-/**
- * Calculate token amounts from liquidity delta
- * Based on Uniswap V3 liquidity math
- */
-function getAmountsForLiquidity(
-  sqrtRatioX96: bigint,
-  sqrtRatioAX96: bigint,
-  sqrtRatioBX96: bigint,
-  liquidityDelta: bigint,
-): { amount0: bigint; amount1: bigint } {
-  let amount0 = BigInt(0);
-  let amount1 = BigInt(0);
-
-  if (sqrtRatioAX96 > sqrtRatioBX96) {
-    [sqrtRatioAX96, sqrtRatioBX96] = [sqrtRatioBX96, sqrtRatioAX96];
-  }
-
-  if (sqrtRatioX96 <= sqrtRatioAX96) {
-    // Current price is below the range, only token0
-    const numerator = liquidityDelta << BigInt(96);
-    const denominator = sqrtRatioBX96 - sqrtRatioAX96;
-    if (denominator !== BigInt(0)) {
-      amount0 = numerator / denominator;
-    }
-  } else if (sqrtRatioX96 < sqrtRatioBX96) {
-    // Current price is within the range, both tokens
-    const numerator0 = liquidityDelta << BigInt(96);
-    const denominator0 = sqrtRatioBX96 - sqrtRatioX96;
-    if (denominator0 !== BigInt(0)) {
-      amount0 = numerator0 / denominator0;
-    }
-
-    const numerator1 = liquidityDelta * (sqrtRatioX96 - sqrtRatioAX96);
-    amount1 = numerator1 >> BigInt(96);
-  } else {
-    // Current price is above the range, only token1
-    const numerator = liquidityDelta * (sqrtRatioBX96 - sqrtRatioAX96);
-    amount1 = numerator >> BigInt(96);
-  }
-
-  return { amount0, amount1 };
 }
 
 /**
@@ -155,6 +96,8 @@ export class SwapEventsService implements OnModuleInit {
     private tokenModel: Model<TokenDocument>,
     private configService: ConfigService,
     private eventEmitter: EventEmitter2,
+    @Inject(forwardRef(() => AggregationService))
+    private aggregationService: AggregationService,
   ) {}
 
   async onModuleInit() {
@@ -176,7 +119,6 @@ export class SwapEventsService implements OnModuleInit {
       this.provider = new ethers.WebSocketProvider(wsUrl);
 
       const poolManagerAddress = this.configService.uniswapV4PoolManagerAddress;
-      console.log('poolManagerAddress', poolManagerAddress);
       this.contract = new ethers.Contract(
         poolManagerAddress,
         POOL_MANAGER_ABI,
@@ -620,8 +562,11 @@ export class SwapEventsService implements OnModuleInit {
       const savedEvent = await this.swapEventModel.create(swapEvent);
       this.logger.log(`New swap event: ${event.transactionHash} - Block ${event.blockNumber}`);
 
-      // Emit event for WebSocket gateway and aggregation
+      // Emit event for WebSocket gateway
       this.eventEmitter.emit('swap.created', savedEvent);
+
+      // Process aggregation directly
+      await this.aggregationService.processSwapEvent(savedEvent);
 
       // Update sync state with latest block
       const poolManagerAddress = this.configService.uniswapV4PoolManagerAddress;
@@ -667,15 +612,8 @@ export class SwapEventsService implements OnModuleInit {
 
       // Calculate token amounts from liquidity delta using tick math
       const sqrtPriceX96 = BigInt(pool.sqrtPriceX96);
-      const sqrtRatioAX96 = getSqrtRatioAtTick(tickLower);
-      const sqrtRatioBX96 = getSqrtRatioAtTick(tickUpper);
-
-      const { amount0, amount1 } = getAmountsForLiquidity(
-        sqrtPriceX96,
-        sqrtRatioAX96,
-        sqrtRatioBX96,
-        liquidityDelta,
-      );
+      const amount0 = getAmount0(tickLower, tickUpper, pool.tick, liquidityDelta, sqrtPriceX96);
+      const amount1 = getAmount1(tickLower, tickUpper, pool.tick, liquidityDelta, sqrtPriceX96);
 
       // Update TVL by adding the calculated amounts
       const currentTVL0 = BigInt(pool.totalValueLockedToken0 || '0');
@@ -824,15 +762,14 @@ export class SwapEventsService implements OnModuleInit {
    */
   private async updateTokenWhitelists(poolId: string, currency0: string, currency1: string) {
     const whitelistTokens = this.configService.whitelistTokens;
-
     // Check if currency0 is whitelisted
-    if (whitelistTokens.includes(currency0)) {
+    if (whitelistTokens.includes(currency0.toLowerCase())) {
       // Add pool to currency1's whitelist
       await this.updateTokenWhitelist(currency1, poolId);
     }
 
     // Check if currency1 is whitelisted
-    if (whitelistTokens.includes(currency1)) {
+    if (whitelistTokens.includes(currency1.toLowerCase())) {
       // Add pool to currency0's whitelist
       await this.updateTokenWhitelist(currency0, poolId);
     }
@@ -843,9 +780,8 @@ export class SwapEventsService implements OnModuleInit {
    */
   private async updateTokenWhitelist(tokenAddress: string, poolId: string) {
     try {
-      // Emit event for aggregation service to handle
-      // Note: Token document may not exist yet (will be created with defaults if needed)
-      this.eventEmitter.emit('token.whitelist.update', {
+      // Call aggregation service directly to update whitelist
+      await this.aggregationService.processTokenWhitelistUpdate({
         tokenAddress,
         poolId,
       });

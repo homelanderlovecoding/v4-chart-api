@@ -52,8 +52,6 @@ export class AggregationService implements OnModuleInit {
     private tokenModel: Model<TokenDocument>,
     @InjectModel(Pool.name)
     private poolModel: Model<PoolDocument>,
-    @InjectModel(SwapEvent.name)
-    private swapEventModel: Model<SwapEventDocument>,
     private eventEmitter: EventEmitter2,
     private configService: ConfigService,
   ) {}
@@ -85,7 +83,7 @@ export class AggregationService implements OnModuleInit {
     name: string;
   }> {
     try {
-      if (tokenAddress === '0x0000000000000000000000000000000000000000') {
+      if (tokenAddress === '0x0000000000000000000000000000000000000000' || tokenAddress === this.configService.wrappedNativeAddress) {
         return {
           decimals: 18,
           symbol: 'ETH',
@@ -152,20 +150,23 @@ export class AggregationService implements OnModuleInit {
   }
 
   /**
-   * Convert amount string to decimal number
-   */
-  private toDecimal(amount: string, decimals: number = 18): number {
-    const value = BigInt(amount);
-    const divisor = BigInt(10) ** BigInt(decimals);
-    return Number(value) / Number(divisor);
-  }
-
-  /**
    * Calculate absolute value of amount
    */
   private abs(amount: string): bigint {
     const value = BigInt(amount);
     return value < 0 ? -value : value;
+  }
+
+  /**
+   * Convert raw token amount to decimal value using token decimals
+   */
+  private toDecimal(amount: string, decimals: number): number {
+    const value = BigInt(amount);
+    const divisor = BigInt(10) ** BigInt(decimals);
+    // Convert to float by dividing and using remainder for precision
+    const whole = Number(value / divisor);
+    const remainder = Number(value % divisor);
+    return whole + remainder / Number(divisor);
   }
 
   /**
@@ -204,26 +205,29 @@ export class AggregationService implements OnModuleInit {
   }
 
   /**
-   * Listen for swap.created events and update current records in real-time
+   * Process swap event and update aggregation data
+   * Called directly by SwapEventsService
    */
-  @OnEvent('swap.created')
-  async handleSwapEvent(swap: SwapEventDocument) {
+  async processSwapEvent(swap: SwapEventDocument) {
     try {
       // Update current records for both tokens
-      await Promise.all([
-        this.updateCurrentRecord(swap, swap.token0Address, true),
-        this.updateCurrentRecord(swap, swap.token1Address, false),
-      ]);
+      // await Promise.all([
+      //   this.updateCurrentRecord(swap, swap.token0Address, true),
+      //   this.updateCurrentRecord(swap, swap.token1Address, false),
+      // ]);
+
+      await this.updateCurrentRecord(swap, swap.token0Address, true);
+      await this.updateCurrentRecord(swap, swap.token1Address, false);
     } catch (error) {
       this.logger.error('Error handling swap event for aggregation', error);
     }
   }
 
   /**
-   * Listen for token whitelist update events
+   * Update token whitelist with a new pool
+   * Called directly by SwapEventsService
    */
-  @OnEvent('token.whitelist.update')
-  async handleTokenWhitelistUpdate(data: { tokenAddress: string; poolId: string }) {
+  async processTokenWhitelistUpdate(data: { tokenAddress: string; poolId: string }) {
     try {
       const { tokenAddress, poolId } = data;
 
@@ -324,7 +328,7 @@ export class AggregationService implements OnModuleInit {
     const amountUSD = 0;
 
     // Calculate fees
-    const feePercentage = swap.fee / 1_000_000;
+    const feePercentage = swap.fee / 10000;
     const feesUSD = amountUSD * feePercentage;
 
     // Calculate TVL delta
@@ -333,8 +337,6 @@ export class AggregationService implements OnModuleInit {
 
     // derived BTC
     const derivedBTC = await this.findNativePerToken(token, this.configService.wrappedNativeAddress, this.configService.stablecoinAddresses, ZERO_BI);
-    console.log('derivedBTC', derivedBTC);
-    console.log('tx hash', swap.transactionHash);
 
     // Update cumulative token values
     await this.tokenModel.updateOne(
@@ -350,13 +352,10 @@ export class AggregationService implements OnModuleInit {
           feesUSD: (parseFloat(token.feesUSD) + feesUSD).toFixed(6),
           // totalValueLocked: newTVL.toString(),
           // totalValueLockedUSD: newTVLUSD.toFixed(6),
-          derivedBTC: derivedBTC.toFixed(6),
+          derivedBTC: derivedBTC.toFixed(18),
         },
       },
     );
-
-    console.log('updated current record for', tokenAddress, 'new derivedBTC', derivedBTC);  
-    
 
     // Update minute, hour, and day records
     await Promise.all([
@@ -617,6 +616,8 @@ private async findNativePerToken(
   stablecoinAddresses: string[],
   minimumNativeLocked: bigint,
 ): Promise<number> {
+  console.log("--------------------------------");
+  console.log('token.address', token.address);
   if (token.address == wrappedNativeAddress || token.address == '0x0000000000000000000000000000000000000000') {
     return 1
   }
@@ -650,7 +651,11 @@ private async findNativePerToken(
             // get the derived ETH in pool
             if (token1) {
               // Use liquidity as a proxy for pool size
-              const btcLocked = parseFloat(pool.totalValueLockedToken1) * parseFloat(token1.derivedBTC)
+              const tvlDecimal = this.toDecimal(pool.totalValueLockedToken1, token1.decimals);
+              const btcLocked = tvlDecimal * parseFloat(token1.derivedBTC)
+              console.log('token1', token1);
+              console.log('pool.totalValueLockedToken1', tvlDecimal);
+              console.log('token1.derivedBTC', token1.derivedBTC);
               console.log('btcLocked', btcLocked);
 
               if (btcLocked > largestLiquidityBTC && btcLocked > Number(minimumNativeLocked)) {
@@ -665,7 +670,11 @@ private async findNativePerToken(
             // get the derived ETH in pool
             if (token0) {
               // Use liquidity as a proxy for pool size
-              const btcLocked = parseFloat(pool.totalValueLockedToken0) * parseFloat(token0.derivedBTC)
+              const tvlDecimal = this.toDecimal(pool.totalValueLockedToken0, token0.decimals);
+              const btcLocked = tvlDecimal * parseFloat(token0.derivedBTC)
+              console.log('token0', token0);
+              console.log('pool.totalValueLockedToken0', tvlDecimal);
+              console.log('token0.derivedBTC', token0.derivedBTC);
               console.log('btcLocked', btcLocked);
               if (btcLocked > largestLiquidityBTC && btcLocked > Number(minimumNativeLocked)) {
                 largestLiquidityBTC = btcLocked

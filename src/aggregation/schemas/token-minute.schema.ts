@@ -10,7 +10,7 @@ export enum RecordStatus {
 
 @Schema({ timestamps: true })
 export class TokenMinute {
-  @Prop({ required: true, index: true })
+  @Prop({ required: true, index: true, set: (val: string) => val.toLowerCase() })
   tokenAddress: string;
 
   @Prop({ required: true, index: true })
